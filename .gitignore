@@ -1,0 +1,33 @@
+﻿# Compilación .NET
+bin/
+obj/
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Firebase - NO subir credenciales
+firebase-credentials.json
+**/firebase-credentials.json
+**/Config/firebase-credentials.json
+
+# Configuración local
+appsettings.Development.json
+
+# Logs
+*.log
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos temporales
+*.tmp
+*.temp

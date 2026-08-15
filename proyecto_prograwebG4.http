@@ -1,0 +1,6 @@
+@proyecto_prograwebG4_HostAddress = http://localhost:5119
+
+GET {{proyecto_prograwebG4_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

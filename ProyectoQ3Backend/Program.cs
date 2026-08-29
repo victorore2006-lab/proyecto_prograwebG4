@@ -1,11 +1,13 @@
-using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 using ProyectoQ3Backend.Services;
 using Scalar.AspNetCore;
+using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<FirebaseService>();
-builder.Services.AddHttpClient<AuthService>();
+builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<NoteService>();
 
@@ -16,14 +18,21 @@ builder.Services.AddOpenApi(options =>
 });
 
 builder.Services
-    .AddAuthentication(options =>
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
     {
-        options.DefaultAuthenticateScheme = FirebaseAuthenticationHandler.SchemeName;
-        options.DefaultChallengeScheme = FirebaseAuthenticationHandler.SchemeName;
-    })
-    .AddScheme<AuthenticationSchemeOptions, FirebaseAuthenticationHandler>(
-        FirebaseAuthenticationHandler.SchemeName,
-        _ => { });
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+    });
     
     builder.Services.AddAuthorization();
 

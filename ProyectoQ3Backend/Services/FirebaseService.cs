@@ -1,3 +1,5 @@
+using FirebaseAdmin;
+using FirebaseAdmin.Auth;
 using Google.Apis.Auth.OAuth2;
 using Google.Cloud.Firestore;
 
@@ -6,6 +8,7 @@ namespace ProyectoQ3Backend.Services;
 public class FirebaseService
 {
     private readonly FirestoreDb _firestoreDb;
+    public FirebaseAuth Auth { get; }
 
     public FirebaseService(IConfiguration configuration, IWebHostEnvironment environment)
     {
@@ -28,6 +31,14 @@ public class FirebaseService
         var credential = CredentialFactory
             .FromFile<ServiceAccountCredential>(credentialPath)
             .ToGoogleCredential();
+
+        var firebaseApp = FirebaseApp.Create(new AppOptions
+        {
+            Credential = credential,
+            ProjectId = projectId
+        });
+
+        Auth = FirebaseAuth.GetAuth(firebaseApp);
 
         _firestoreDb = new FirestoreDbBuilder
         {

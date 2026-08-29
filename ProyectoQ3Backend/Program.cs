@@ -1,16 +1,12 @@
-using System.Text;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.Authentication;
 using ProyectoQ3Backend.Services;
 using Scalar.AspNetCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
-/**
- * Una sola instancia para toda la vida de ejecucion de la app
- */
 builder.Services.AddSingleton<FirebaseService>();
-
-builder.Services.AddScoped<AuthService>();
+builder.Services.AddHttpClient<AuthService>();
+builder.Services.AddScoped<UserService>();
 builder.Services.AddScoped<NoteService>();
 
 builder.Services.AddControllers();
@@ -19,21 +15,15 @@ builder.Services.AddOpenApi(options =>
     options.AddDocumentTransformer<BearerSecuritySchemeTransformer>();
 });
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+builder.Services
+    .AddAuthentication(options =>
     {
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = builder.Configuration["Jwt:Issuer"],
-            ValidAudience = builder.Configuration["Jwt:Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!)),
-        };
-    });
+        options.DefaultAuthenticateScheme = FirebaseAuthenticationHandler.SchemeName;
+        options.DefaultChallengeScheme = FirebaseAuthenticationHandler.SchemeName;
+    })
+    .AddScheme<AuthenticationSchemeOptions, FirebaseAuthenticationHandler>(
+        FirebaseAuthenticationHandler.SchemeName,
+        _ => { });
     
     builder.Services.AddAuthorization();
 
@@ -54,9 +44,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         app.MapOpenApi();
         app.MapScalarApiReference(options =>
         {
-            options.WithTitle("NoteBook API")
-                .WithPreferredScheme("Bearer")
-                .WithHttpBearerAuthentication(bearer =>
+            options.WithTitle("UserHub API")
+                .AddPreferredSecuritySchemes(["Bearer"])
+                .AddHttpAuthentication("Bearer", bearer =>
                 {
                     bearer.Token = "";
                 });

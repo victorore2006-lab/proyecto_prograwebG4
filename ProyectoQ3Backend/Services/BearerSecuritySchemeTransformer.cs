@@ -4,8 +4,7 @@ using Microsoft.OpenApi;
 
 namespace ProyectoQ3Backend.Services
 {
-    // Esta clase le dice a Scalar que nuestra API usa Bearer tokens.
-    // Sin esto Scalar no muestra el botón para pegar el token JWT.
+    
     internal sealed class BearerSecuritySchemeTransformer : IOpenApiDocumentTransformer
     {
         private readonly IAuthenticationSchemeProvider _authenticationSchemeProvider;
@@ -37,7 +36,7 @@ namespace ProyectoQ3Backend.Services
                     BearerFormat = "JWT"
                 };
 
-                foreach (var operation in document.Paths.Values.SelectMany(p => p.Operations))
+                foreach (var operation in document.Paths.Values.SelectMany(p => p.Operations ?? []))
                 {
                     operation.Value.Security ??= new List<OpenApiSecurityRequirement>();
                     operation.Value.Security.Add(new OpenApiSecurityRequirement

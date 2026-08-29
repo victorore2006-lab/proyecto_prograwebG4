@@ -9,7 +9,7 @@ obj/
 .vs/
 
 # Las credenciales de Firebase nunca se deben de subir
-config/*.json
+ProyectoQ3Backend/config/*.json
 
 # Archivos locales
 appsettings.Development.json

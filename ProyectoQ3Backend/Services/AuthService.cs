@@ -1,6 +1,9 @@
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using FirebaseAdmin.Auth;
+using Microsoft.IdentityModel.Tokens;
 using ProyectoQ3Backend.DTOs;
 using ProyectoQ3Backend.Models;
 
@@ -8,51 +11,42 @@ namespace ProyectoQ3Backend.Services;
 
 public class AuthService
 {
-    private const string AuthBaseUrl = "https://identitytoolkit.googleapis.com/v1/accounts";
-    private readonly HttpClient _httpClient;
+    private const int PasswordIterations = 100_000;
     private readonly FirebaseService _firebaseService;
-    private readonly string _apiKey;
+    private readonly IConfiguration _configuration;
 
-    public AuthService(
-        HttpClient httpClient,
-        FirebaseService firebaseService,
-        IConfiguration configuration)
+    public AuthService(FirebaseService firebaseService, IConfiguration configuration)
     {
-        _httpClient = httpClient;
         _firebaseService = firebaseService;
-        _apiKey = configuration["Firebase:ApiKey"]
-            ?? throw new InvalidOperationException("No se configuró Firebase:ApiKey.");
-
-        if (string.IsNullOrWhiteSpace(_apiKey) || _apiKey == "API_KEY")
-        {
-            throw new InvalidOperationException(
-                "Configura Firebase:ApiKey con la Web API Key del proyecto Firebase.");
-        }
+        _configuration = configuration;
     }
 
     public async Task<AuthResponseDto> RegisterAsync(RegisterDto dto)
     {
-        ValidateProfile(
-            dto.DisplayName,
-            dto.Username,
-            dto.PhoneNumber,
-            dto.BirthDate,
-            dto.Country,
-            dto.Bio);
+        ValidateProfile(dto);
+        var email = dto.Email.Trim().ToLowerInvariant();
+        UserRecord firebaseUser;
 
-        var authResult = await SendAuthRequestAsync(
-            "signUp",
-            new
+        try
+        {
+            firebaseUser = await _firebaseService.Auth.CreateUserAsync(new UserRecordArgs
             {
-                email = dto.Email.Trim().ToLowerInvariant(),
-                password = dto.Password,
-                returnSecureToken = true
+                Email = email,
+                Password = dto.Password,
+                DisplayName = dto.DisplayName.Trim()
             });
+        }
+        catch (FirebaseAuthException exception)
+        {
+            throw new InvalidOperationException(
+                $"Firebase Authentication no pudo crear el usuario: {exception.Message}",
+                exception);
+        }
 
         var user = new AppUser
         {
-            Id = authResult.LocalId,
-            Email = authResult.Email,
+            Id = firebaseUser.Uid,
+            Email = email,
             DisplayName = dto.DisplayName.Trim(),
             Username = dto.Username.Trim(),
             PhoneNumber = dto.PhoneNumber.Trim(),
@@ -61,116 +55,177 @@ public class AuthService
             Bio = dto.Bio.Trim(),
             Role = "Usuario",
             CreatedAt = DateTime.UtcNow,
-            UserId = authResult.LocalId
+            UserId = firebaseUser.Uid
         };
 
         try
         {
-            await _firebaseService
-                .GetCollection("users")
-                .Document(authResult.LocalId)
-                .CreateAsync(user);
+            await _firebaseService.GetCollection("users")
+                .Document(user.Id)
+                .CreateAsync(new Dictionary<string, object>
+                {
+                    ["Id"] = user.Id,
+                    ["Email"] = user.Email,
+                    ["DisplayName"] = user.DisplayName,
+                    ["Username"] = user.Username,
+                    ["PhoneNumber"] = user.PhoneNumber,
+                    ["BirthDate"] = user.BirthDate,
+                    ["Country"] = user.Country,
+                    ["Bio"] = user.Bio,
+                    ["Role"] = user.Role,
+                    ["CreatedAt"] = user.CreatedAt,
+                    ["UserId"] = user.UserId,
+                    ["PasswordHash"] = HashPassword(dto.Password)
+                });
         }
         catch
         {
-            await DeleteAccountWithTokenAsync(authResult.IdToken);
+            await _firebaseService.Auth.DeleteUserAsync(firebaseUser.Uid);
             throw;
         }
 
-        return authResult;
+        return CreateAuthResponse(user.Id, user.Email, user.Role);
     }
 
-    public Task<AuthResponseDto> LoginAsync(LoginDto dto)
+    public async Task<AuthResponseDto> LoginAsync(LoginDto dto)
     {
-        return SendAuthRequestAsync(
-            "signInWithPassword",
-            new
-            {
-                email = dto.Email.Trim().ToLowerInvariant(),
-                password = dto.Password,
-                returnSecureToken = true
-            });
-    }
+        var email = dto.Email.Trim().ToLowerInvariant();
+        var snapshot = await _firebaseService.GetCollection("users")
+            .WhereEqualTo("Email", email)
+            .Limit(1)
+            .GetSnapshotAsync();
 
-    private async Task<AuthResponseDto> SendAuthRequestAsync(string action, object payload)
-    {
-        using var response = await _httpClient.PostAsJsonAsync(
-            $"{AuthBaseUrl}:{action}?key={Uri.EscapeDataString(_apiKey)}",
-            payload);
-
-        if (!response.IsSuccessStatusCode)
+        if (snapshot.Count == 0)
         {
-            throw new InvalidOperationException(await GetFirebaseErrorAsync(response));
+            snapshot = await _firebaseService.GetCollection("user")
+                .WhereEqualTo("Email", dto.Email.Trim())
+                .Limit(1)
+                .GetSnapshotAsync();
         }
 
-        var result = await response.Content.ReadFromJsonAsync<FirebaseAuthResponse>()
-            ?? throw new InvalidOperationException("Firebase devolvió una respuesta vacía.");
+        if (snapshot.Count == 0)
+        {
+            throw new InvalidOperationException("Credenciales inválidas.");
+        }
+
+        var data = snapshot.Documents[0].ToDictionary();
+        var passwordHash = GetRequiredValue(data, "PasswordHash");
+
+        if (!VerifyPassword(dto.Password, passwordHash))
+        {
+            throw new InvalidOperationException("Credenciales inválidas.");
+        }
+
+        var userId = data.TryGetValue("UserId", out var storedUserId)
+            ? storedUserId.ToString()!
+            : GetRequiredValue(data, "Id");
+        var storedEmail = GetRequiredValue(data, "Email");
+        var role = data.TryGetValue("Role", out var storedRole)
+            ? storedRole.ToString()!
+            : "Usuario";
+
+        return CreateAuthResponse(userId, storedEmail, role);
+    }
+
+    private AuthResponseDto CreateAuthResponse(string userId, string email, string role)
+    {
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, userId),
+            new Claim("user_id", userId),
+            new Claim(ClaimTypes.Email, email),
+            new Claim(ClaimTypes.Role, role)
+        };
+
+        var jwtKey = _configuration["Jwt:Key"]
+            ?? throw new InvalidOperationException("No se configuró Jwt:Key.");
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(
+            issuer: _configuration["Jwt:Issuer"],
+            audience: _configuration["Jwt:Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddHours(8),
+            signingCredentials: credentials);
 
         return new AuthResponseDto
         {
-            IdToken = result.IdToken,
-            LocalId = result.LocalId,
-            Email = result.Email
+            IdToken = new JwtSecurityTokenHandler().WriteToken(token),
+            LocalId = userId,
+            Email = email
         };
     }
 
-    private async Task DeleteAccountWithTokenAsync(string idToken)
+    private static string HashPassword(string password)
     {
-        using var response = await _httpClient.PostAsJsonAsync(
-            $"{AuthBaseUrl}:delete?key={Uri.EscapeDataString(_apiKey)}",
-            new { idToken });
+        var salt = RandomNumberGenerator.GetBytes(16);
+        var hash = Rfc2898DeriveBytes.Pbkdf2(
+            password,
+            salt,
+            PasswordIterations,
+            HashAlgorithmName.SHA256,
+            32);
+
+        return $"{PasswordIterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(hash)}";
     }
 
-    private static async Task<string> GetFirebaseErrorAsync(HttpResponseMessage response)
+    private static bool VerifyPassword(string password, string storedHash)
     {
-        var json = await response.Content.ReadAsStringAsync();
+        var parts = storedHash.Split('.');
 
-        try
+        if (parts.Length == 3 && int.TryParse(parts[0], out var iterations))
         {
-            using var document = JsonDocument.Parse(json);
-            var code = document.RootElement
-                .GetProperty("error")
-                .GetProperty("message")
-                .GetString();
-
-            return code switch
+            try
             {
-                "EMAIL_EXISTS" => "Ya existe un usuario con ese correo.",
-                "EMAIL_NOT_FOUND" => "Credenciales inválidas.",
-                "INVALID_LOGIN_CREDENTIALS" => "Credenciales inválidas.",
-                "INVALID_PASSWORD" => "Credenciales inválidas.",
-                "USER_DISABLED" => "La cuenta está deshabilitada.",
-                "OPERATION_NOT_ALLOWED" => "Habilita Email/Password en Firebase Authentication.",
-                "WEAK_PASSWORD : Password should be at least 6 characters" =>
-                    "La contraseña debe tener al menos 6 caracteres.",
-                _ => $"Firebase Authentication rechazó la solicitud: {code ?? "error desconocido"}."
-            };
+                var salt = Convert.FromBase64String(parts[1]);
+                var expectedHash = Convert.FromBase64String(parts[2]);
+                var actualHash = Rfc2898DeriveBytes.Pbkdf2(
+                    password,
+                    salt,
+                    iterations,
+                    HashAlgorithmName.SHA256,
+                    expectedHash.Length);
+
+                return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
-        catch (JsonException)
-        {
-            return $"Firebase Authentication respondió con el estado {(int)response.StatusCode}.";
-        }
+
+        var legacyHash = Convert.ToBase64String(
+            SHA256.HashData(Encoding.UTF8.GetBytes(password)));
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(legacyHash),
+            Encoding.UTF8.GetBytes(storedHash));
     }
 
-    private static void ValidateProfile(
-        string displayName,
-        string username,
-        string phoneNumber,
-        DateTime? birthDate,
-        string country,
-        string bio)
+    private static string GetRequiredValue(
+        IReadOnlyDictionary<string, object> data,
+        string field)
     {
-        if (string.IsNullOrWhiteSpace(displayName) ||
-            string.IsNullOrWhiteSpace(username) ||
-            string.IsNullOrWhiteSpace(phoneNumber) ||
-            string.IsNullOrWhiteSpace(country) ||
-            string.IsNullOrWhiteSpace(bio) ||
-            birthDate is null)
+        if (!data.TryGetValue(field, out var value) || value is null)
+        {
+            throw new InvalidOperationException($"El perfil no contiene el campo {field}.");
+        }
+
+        return value.ToString()!;
+    }
+
+    private static void ValidateProfile(RegisterDto dto)
+    {
+        if (string.IsNullOrWhiteSpace(dto.DisplayName) ||
+            string.IsNullOrWhiteSpace(dto.Username) ||
+            string.IsNullOrWhiteSpace(dto.PhoneNumber) ||
+            string.IsNullOrWhiteSpace(dto.Country) ||
+            string.IsNullOrWhiteSpace(dto.Bio) ||
+            dto.BirthDate is null)
         {
             throw new InvalidOperationException("Todos los campos del perfil son obligatorios.");
         }
 
-        if (birthDate.Value.Date > DateTime.UtcNow.Date)
+        if (dto.BirthDate.Value.Date > DateTime.UtcNow.Date)
         {
             throw new InvalidOperationException("La fecha de nacimiento no puede estar en el futuro.");
         }
@@ -184,17 +239,5 @@ public class AuthService
             DateTimeKind.Local => value.ToUniversalTime(),
             _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
         };
-    }
-
-    private sealed class FirebaseAuthResponse
-    {
-        [JsonPropertyName("idToken")]
-        public string IdToken { get; set; } = string.Empty;
-
-        [JsonPropertyName("localId")]
-        public string LocalId { get; set; } = string.Empty;
-
-        [JsonPropertyName("email")]
-        public string Email { get; set; } = string.Empty;
     }
 }

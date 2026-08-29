@@ -1,33 +1,23 @@
-﻿# Compilación .NET
+# Archivos de build
 bin/
 obj/
 
-# JetBrains Rider
+#Rider
 .idea/
-*.sln.iml
 
 # Visual Studio
 .vs/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
 
-# Firebase - NO subir credenciales
-firebase-credentials.json
-**/firebase-credentials.json
-**/Config/firebase-credentials.json
+# Las credenciales de Firebase nunca se deben de subir
+config/*.json
 
-# Configuración local
+# Archivos locales
 appsettings.Development.json
-
-# Logs
-*.log
 
 # Sistema operativo
 .DS_Store
 Thumbs.db
 
-# Archivos temporales
-*.tmp
-*.temp
+# Archivos de usuario
+*.user
+*.suo
